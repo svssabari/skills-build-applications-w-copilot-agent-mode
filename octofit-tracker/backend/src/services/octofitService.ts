@@ -71,11 +71,42 @@ export async function createTeam(input: unknown) {
 }
 
 export async function getLeaderboard() {
-  return [];
+  const totals = await Activity.aggregate<{ _id: Types.ObjectId; totalPoints: number }>([
+    { $group: { _id: '$team', totalPoints: { $sum: '$points' } } },
+  ]);
+  const teams = await Team.find({ _id: { $in: totals.map(({ _id }) => _id) } }).select('name').lean();
+  const teamNames = new Map(teams.map((team) => [team._id.toString(), team.name]));
+
+  return totals
+    .flatMap(({ _id, totalPoints }) => {
+      const teamName = teamNames.get(_id.toString());
+      return teamName === undefined ? [] : [{ teamName, totalPoints }];
+    })
+    .sort((left, right) => right.totalPoints - left.totalPoints || left.teamName.localeCompare(right.teamName))
+    .map((entry, index) => ({ ...entry, rank: index + 1 }));
 }
 
-export async function suggestWorkouts(_userEmail: string) {
-  return Workout.find().limit(1).lean();
+export async function suggestWorkouts(userEmail: string) {
+  const user = await User.findOne({ email: userEmail }).lean();
+  if (!user) {
+    throw Object.assign(new Error('User not found'), { status: 404 });
+  }
+
+  const activities = await Activity.find({ user: user._id }).select('type').lean();
+  const activityTypes = [...new Set(activities.map(({ type }) => type.trim().toLowerCase()))];
+  const goal = user.fitnessGoal.trim().toLowerCase();
+  const matchingFocuses = new Set([goal, ...activityTypes]);
+  const workouts = await Workout.find().lean();
+
+  return workouts
+    .filter(({ focus }) => matchingFocuses.has(focus.trim().toLowerCase()))
+    .sort((left, right) => Number(right.focus.trim().toLowerCase() === goal) - Number(left.focus.trim().toLowerCase() === goal))
+    .map((workout) => ({
+      ...workout,
+      reason: workout.focus.trim().toLowerCase() === goal
+        ? `Recommended for your ${user.fitnessGoal} goal${activityTypes.length ? ` and ${activityTypes.join(', ')} activity` : ''}.`
+        : `Recommended based on your ${workout.focus} activity.`,
+    }));
 }
 
 export { User };
